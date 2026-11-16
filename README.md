@@ -110,6 +110,33 @@ enables fixed foveation, and lowers the per-eye resolution automatically when
 frames are dropped. Tunables: `?xrscale=` (framebuffer scale), `?xrhz=`
 (refresh rate), `?xrmax=` (max splat size, default 512).
 
+## From a monocular video, via 4DAnyone
+
+[4DAnyone](https://github.com/ant-research/4DAnyone) turns one casual video of
+a person into multiview videos and trains a 4DGS model on them.
+`tools/fdanyone_to_frames.py` bakes that model
+(`<result>/4dgs/checkpoints/latest.npz`) into `.splat` frames:
+
+```bash
+uv run --with numpy python tools/fdanyone_to_frames.py \
+    path/to/4dgs/checkpoints/latest.npz data/frames/person
+splat4d encode -i data/frames/person -o person.splat4d
+```
+
+4DAnyone's gaussians are native 4D: each one lives around a point in time and
+fades in and out. The bake writes every kept gaussian in every frame (the
+format needs a constant splat count), with alpha 0 and a frozen position while
+it is inactive. Rotation, scale and colour are constant per gaussian, so only
+position and alpha end up in the dynamic streams, and the viewer leaves
+alpha-0 splats out of its sort and draw.
+
+- View-dependent colour is dropped: `.splat` has flat RGB, so only the SH DC
+  term survives.
+- The script prints total vs. alive-per-frame gaussians. `--max-splats N` and
+  `--min-peak-alpha A` trim the model for headsets.
+- `tools/test_fdanyone_to_frames.py` checks the math on a synthetic model; no
+  4DAnyone install or GPU needed.
+
 ## Stream from an object store (S3 / GCS / R2 / any HTTP host)
 
 `.splat4d` is designed for plain **HTTP Range requests** — no server logic, no

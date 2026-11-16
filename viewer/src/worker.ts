@@ -10,7 +10,8 @@
 // Protocol (main -> worker):
 //   {type:'load', url}
 //   {type:'frame', frame}
-//   {type:'view', viewProj: Float32Array}        every frame (worker dedups)
+//   {type:'view', viewProj: Float32Array, all?}  every frame (worker dedups);
+//                                                all=true keeps alpha-0 splats (compare)
 //   {type:'perm', perm: ArrayBuffer}             encoder permutation (compare)
 //   {type:'origframe', frame, buffer}            raw .splat frame (compare)
 //   {type:'return', kind, buffer}                pooled buffer return
@@ -173,7 +174,7 @@ self.onmessage = (e: MessageEvent) => {
     } else if (m.type === 'frame') {
       requestFrame(m.frame);
     } else if (m.type === 'view') {
-      runSort(m.viewProj);
+      runSort(m.viewProj, m.all === true);
     } else if (m.type === 'perm') {
       permArr = new Uint32Array(m.perm);
     } else if (m.type === 'origframe') {
@@ -572,12 +573,16 @@ function servePending() {
 // ---- depth sort (reference 16-bit counting sort, ascending = front-to-back)
 let lastProj: Float32Array | null = null;
 let lastSortedFrame = -2;
+let lastSortAll = false;
 
-function runSort(viewProj: Float32Array) {
+// Splats whose alpha byte is 0 contribute exactly nothing to the blend, so they
+// are left out of the index list (unless `all`): baked 4D models keep every
+// gaussian in every frame and only a fraction is alive at any instant.
+function runSort(viewProj: Float32Array, all = false) {
   if (!header || !posF) return;
   // reference redundancy check: skip if view direction barely changed AND the
   // frame (splat positions) didn't change since the last sort
-  if (lastProj && lastSortedFrame === curFrame) {
+  if (lastProj && lastSortedFrame === curFrame && lastSortAll === all) {
     const dot = lastProj[2] * viewProj[2] + lastProj[6] * viewProj[6] + lastProj[10] * viewProj[10];
     if (Math.abs(dot - 1) < 0.01) return;
   }
@@ -607,17 +612,23 @@ function runSort(viewProj: Float32Array) {
     if (b < 0) b = 0;
     else if (b > 65535) b = 65535;
     sizeList[i] = b;
-    counts0[b]++;
+    if (all || rgbaB[i * 4 + 3] !== 0) counts0[b]++;
   }
   const starts0 = new Uint32Array(256 * 256);
   for (let i = 1; i < 256 * 256; i++) starts0[i] = starts0[i - 1] + counts0[i - 1];
   const ib = pools.sort.pop() ?? new ArrayBuffer(vertexCount * 4);
   const depthIndex = new Uint32Array(ib, 0, vertexCount);
-  for (let i = 0; i < vertexCount; i++) depthIndex[starts0[sizeList[i]]++] = i;
+  let drawn = 0;
+  for (let i = 0; i < vertexCount; i++) {
+    if (!all && rgbaB[i * 4 + 3] === 0) continue;
+    depthIndex[starts0[sizeList[i]]++] = i;
+    drawn++;
+  }
 
   lastProj = viewProj.slice(0);
   lastSortedFrame = curFrame;
-  post({ type: 'sorted', indices: ib, count: vertexCount, sortMs: performance.now() - t0 }, [ib]);
+  lastSortAll = all;
+  post({ type: 'sorted', indices: ib, count: drawn, sortMs: performance.now() - t0 }, [ib]);
 }
 
 // ---- diagnostics -----------------------------------------------------------

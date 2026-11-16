@@ -670,7 +670,7 @@ async function init() {
       const fx = focalOverride ? focalOverride[0] : fy;
       const proj = getProjectionMatrix(fx, fy, innerWidth, innerHeight);
       const viewProj = multiply4(proj, controls.viewMatrix);
-      worker?.postMessage({ type: 'view', viewProj: new Float32Array(viewProj) });
+      worker?.postMessage({ type: 'view', viewProj: new Float32Array(viewProj), all: compareOn });
 
       splats.setCamera(proj, controls.viewMatrix, fx, fy, innerWidth, innerHeight);
       if (origSet && compareOn) origSet.setCamera(proj, controls.viewMatrix, fx, fy, innerWidth, innerHeight);
