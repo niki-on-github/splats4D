@@ -77,6 +77,39 @@ API and hot-swaps the result, showing size, ratio, and verified max errors)
 and a **⇔ compare** mode — split-screen against the original uncompressed
 frames with a draggable divider, rendered through the same pipeline.
 
+## VR / AR on Meta Quest 3 (WebXR)
+
+The viewer runs in the Quest Browser as an immersive WebXR app — same file,
+same streaming worker, rendered in stereo through the WebGL2 backend. When the
+browser supports immersive sessions, **VR** and **AR** (passthrough) buttons
+appear in the transport bar.
+
+```bash
+nix develop                       # or any Node 22+ environment
+cd viewer && npm install && npm run dev
+adb reverse tcp:5173 tcp:5173     # headset on USB; then open http://localhost:5173 on the Quest
+```
+
+WebXR needs a secure context: `localhost` (via `adb reverse`) or HTTPS. A plain
+`http://<lan-ip>:5173` page loads but shows no VR/AR buttons, unless that origin
+is added under `chrome://flags` → *Insecure origins treated as secure*.
+With no `?file=`, the dev server loads the bundled demo scene from `docs/demo`.
+
+| input | action |
+|---|---|
+| left stick | walk (relative to where you look, kept level) |
+| right stick ←→ / ↑↓ | snap turn 30° / scrub time |
+| grip or trigger held (or pinch) | grab and move the scene |
+| both hands held | move + scale + turn |
+| trigger tap, A / X | play / pause |
+| B / Y | re-place the scene in front of you |
+
+On entry the scene is placed so you stand where the desktop camera was, at 1:1
+scale. Fill rate is the limit on a headset, so the XR path requests 72 Hz,
+enables fixed foveation, and lowers the per-eye resolution automatically when
+frames are dropped. Tunables: `?xrscale=` (framebuffer scale), `?xrhz=`
+(refresh rate), `?xrmax=` (max splat size, default 512).
+
 ## Stream from an object store (S3 / GCS / R2 / any HTTP host)
 
 `.splat4d` is designed for plain **HTTP Range requests** — no server logic, no
