@@ -4,8 +4,9 @@
 // split-screen compare against the original uncompressed .splat frames.
 
 import { SplatRenderer } from './renderer';
-import { GlSplatRenderer } from './renderer_gl';
+import { GlSplatRenderer, type GlSplatSet } from './renderer_gl';
 import type { R, RSet } from './rtypes';
+import { startXr, xrSupport, type XrMode } from './xr';
 import {
   getProjectionMatrix,
   multiply4,
@@ -45,7 +46,9 @@ async function init() {
   canvas.classList.add('webgpu');
   $('canvas-wrap').appendChild(canvas);
   // WebGPU when available, WebGL2 otherwise (?gl=1 forces the fallback)
-  const forceGl = new URLSearchParams(location.search).get('gl') === '1';
+  // A headset browser gets WebGL2 too: that is the backend WebXR sessions use.
+  const xrCaps = await xrSupport();
+  const forceGl = new URLSearchParams(location.search).get('gl') === '1' || xrCaps.vr || xrCaps.ar;
   let rendererInit: R | null = null;
   if (!forceGl && navigator.gpu) {
     try {
@@ -639,22 +642,30 @@ async function init() {
 
   // ---- main loop ----
   let lastT = performance.now();
-  function loop() {
-    requestAnimationFrame(loop);
-    const now = performance.now();
+
+  /** advance playback and request the decoded frame; shared by the page and XR loops */
+  function tick(now: number): boolean {
     const dt = (now - lastT) / 1000;
     lastT = now;
+    if (!(meta && splats && sessionReady)) return false;
+    const dur = meta.t / meta.fps;
+    if (playing && waitingGop < 0) {
+      // clamp: after a hidden-tab stall dt can be many seconds
+      timeSec = (timeSec + Math.min(Math.max(dt, 0), 0.1)) % dur;
+    }
+    const frame = Math.min(meta.t - 1, Math.floor(timeSec * meta.fps));
+    if (frame !== lastShownFrame) requestFrame(frame);
+    $('clock').textContent = `${timeSec.toFixed(2)} / ${dur.toFixed(2)}`;
+    return true;
+  }
+
+  function loop() {
+    if (xrSession) return; // the XR session drives rendering until it ends
+    requestAnimationFrame(loop);
+    const now = performance.now();
     controls.update();
 
-    if (meta && splats && sessionReady) {
-      const dur = meta.t / meta.fps;
-      if (playing && waitingGop < 0) {
-        // clamp: after a hidden-tab stall dt can be many seconds
-        timeSec = (timeSec + Math.min(dt, 0.1)) % dur;
-      }
-      const frame = Math.min(meta.t - 1, Math.floor(timeSec * meta.fps));
-      if (frame !== lastShownFrame) requestFrame(frame);
-
+    if (tick(now) && splats) {
       const fy = focalOverride ? focalOverride[1] : (0.5 * innerHeight) / Math.tan((fov * Math.PI) / 360);
       const fx = focalOverride ? focalOverride[0] : fy;
       const proj = getProjectionMatrix(fx, fy, innerWidth, innerHeight);
@@ -664,7 +675,6 @@ async function init() {
       splats.setCamera(proj, controls.viewMatrix, fx, fy, innerWidth, innerHeight);
       if (origSet && compareOn) origSet.setCamera(proj, controls.viewMatrix, fx, fy, innerWidth, innerHeight);
 
-      $('clock').textContent = `${timeSec.toFixed(2)} / ${dur.toFixed(2)}`;
       drawTimeline();
       renderer.render(compareOn && origSet ? [origSet, splats] : [splats]);
     } else {
@@ -677,6 +687,68 @@ async function init() {
       fpsTime = now;
     }
   }
+
+  // ---- WebXR (Quest etc.): immersive VR, and AR over passthrough ----
+  let xrSession: XRSession | null = null;
+  const xrNum = (key: string) => {
+    const v = parseFloat(bootParams.get(key) ?? '');
+    return Number.isFinite(v) ? v : undefined;
+  };
+
+  async function enterXr(mode: XrMode) {
+    if (xrSession || !(renderer instanceof GlSplatRenderer)) return;
+    setCompare(false);
+    const glr = renderer;
+    const opts = {
+      framebufferScale: xrNum('xrscale'),
+      frameRate: xrNum('xrhz'),
+      maxSplatAxis: xrNum('xrmax'),
+    };
+    try {
+      xrSession = await startXr(
+        mode,
+        {
+          renderer: glr,
+          sets: () => (splats && sessionReady ? [splats as GlSplatSet] : []),
+          desktopView: () => controls.viewMatrix,
+          tick: (now) => void tick(now),
+          postSort: (viewProj) => worker?.postMessage({ type: 'view', viewProj: viewProj.slice(0) }),
+          togglePlay: () => setPlaying(!playing),
+          scrub: (fraction) => {
+            if (!meta) return;
+            const dur = meta.t / meta.fps;
+            timeSec = (((timeSec + fraction * dur) % dur) + dur) % dur;
+          },
+          onStats: (fps, scale) => ($('m-fps').textContent = `${fps.toFixed(0)} xr ×${scale.toFixed(2)}`),
+          onEnd: () => {
+            xrSession = null;
+            splats?.setClip(0, 0);
+            onResize();
+            lastT = performance.now();
+            loop();
+          },
+        },
+        Object.fromEntries(Object.entries(opts).filter(([, v]) => v !== undefined))
+      );
+    } catch (e) {
+      console.error('WebXR session failed:', e);
+      $('enc-status').textContent = 'XR failed';
+    }
+  }
+  (window as unknown as Record<string, unknown>).__xr = (mode: XrMode) => enterXr(mode);
+
+  if (renderer instanceof GlSplatRenderer) {
+    for (const [id, on, mode] of [
+      ['vr-btn', xrCaps.vr, 'immersive-vr'],
+      ['ar-btn', xrCaps.ar, 'immersive-ar'],
+    ] as const) {
+      const btn = $(id) as HTMLButtonElement;
+      if (!on || bare) continue;
+      btn.style.display = 'flex';
+      btn.onclick = () => (xrSession ? void xrSession.end() : void enterXr(mode));
+    }
+  }
+
   loop();
 }
 

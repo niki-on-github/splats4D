@@ -3,6 +3,9 @@
 // the worker/streaming pipeline is renderer-agnostic. Consumes the identical
 // rgba32ui texture layout, sorted index buffer, and camera uniforms.
 // Same additive clip extension as the WGSL port (u_clip.y = 0 -> inert).
+// u_lod (max splat axis, min alpha byte) defaults to the reference constants
+// (1024, 0) and is only tightened for WebXR; renderViews() draws the same sets
+// once per eye into an XR framebuffer.
 
 export const TEXWIDTH = 2048;
 
@@ -15,6 +18,7 @@ uniform mat4 projection, view;
 uniform vec2 focal;
 uniform vec2 viewport;
 uniform vec4 u_clip;
+uniform vec2 u_lod;
 
 in vec2 position;
 in int index;
@@ -39,6 +43,7 @@ void main () {
     }
 
     uvec4 cov = texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) << 1) | 1u, uint(index) >> 10), 0);
+    if (float(cov.w >> 24) < u_lod.y) return;
     vec2 u1 = unpackHalf2x16(cov.x), u2 = unpackHalf2x16(cov.y), u3 = unpackHalf2x16(cov.z);
     mat3 Vrk = mat3(u1.x, u1.y, u2.x, u1.y, u2.y, u3.x, u2.x, u3.x, u3.y);
 
@@ -57,8 +62,8 @@ void main () {
 
     if(lambda2 < 0.0) return;
     vec2 diagonalVector = normalize(vec2(cov2d[0][1], lambda1 - cov2d[0][0]));
-    vec2 majorAxis = min(sqrt(2.0 * lambda1), 1024.0) * diagonalVector;
-    vec2 minorAxis = min(sqrt(2.0 * lambda2), 1024.0) * vec2(diagonalVector.y, -diagonalVector.x);
+    vec2 majorAxis = min(sqrt(2.0 * lambda1), u_lod.x) * diagonalVector;
+    vec2 minorAxis = min(sqrt(2.0 * lambda2), u_lod.x) * vec2(diagonalVector.y, -diagonalVector.x);
 
     vColor = clamp(pos2d.z/pos2d.w+1.0, 0.0, 1.0) * vec4((cov.w) & 0xffu, (cov.w >> 8) & 0xffu, (cov.w >> 16) & 0xffu, (cov.w >> 24) & 0xffu) / 255.0;
     vPosition = position;
@@ -89,6 +94,18 @@ void main () {
     float B = exp(A) * vColor.a;
     fragColor = vec4(B * vColor.rgb, B);
 }`;
+
+/** one eye: target viewport (pixels) + camera in the renderer's convention */
+export interface GlView {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  projection: ArrayLike<number>;
+  view: ArrayLike<number>;
+  fx: number;
+  fy: number;
+}
 
 export class GlSplatSet {
   count = 0;
@@ -213,6 +230,7 @@ export class GlSplatRenderer {
   uFocal!: WebGLUniformLocation;
   uViewport!: WebGLUniformLocation;
   uClip!: WebGLUniformLocation;
+  uLod!: WebGLUniformLocation;
   private canvas: HTMLCanvasElement;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -254,6 +272,8 @@ export class GlSplatRenderer {
     r.uFocal = gl.getUniformLocation(program, 'focal')!;
     r.uViewport = gl.getUniformLocation(program, 'viewport')!;
     r.uClip = gl.getUniformLocation(program, 'u_clip')!;
+    r.uLod = gl.getUniformLocation(program, 'u_lod')!;
+    gl.uniform2f(r.uLod, 1024, 0);
     gl.uniform1i(gl.getUniformLocation(program, 'u_texture'), 0);
 
     r.vertexBuffer = gl.createBuffer()!;
@@ -268,8 +288,29 @@ export class GlSplatRenderer {
     return new GlSplatSet(this);
   }
 
+  /** max projected splat axis (reference: 1024) and min alpha byte drawn (reference: 0) */
+  setLod(maxAxis: number, minAlpha: number) {
+    this.gl.uniform2f(this.uLod, maxAxis, minAlpha);
+  }
+
+  /** draw the sets once per view into `framebuffer` (WebXR layer) */
+  renderViews(sets: GlSplatSet[], framebuffer: WebGLFramebuffer | null, views: GlView[]) {
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    for (const v of views) {
+      gl.viewport(v.x, v.y, v.w, v.h);
+      for (const s of sets) {
+        if (!s.visible) continue;
+        s.setCamera(v.projection, v.view, v.fx, v.fy, v.w, v.h);
+        s.draw();
+      }
+    }
+  }
+
   render(sets: GlSplatSet[]) {
     const gl = this.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.clear(gl.COLOR_BUFFER_BIT);
     for (const s of sets) {

@@ -11,6 +11,8 @@ const REPO = path.resolve(__dirname, '..');
 const CONVERTER = path.join(REPO, 'converter/target/release/splat4d');
 const FRAMES_ROOT = path.join(REPO, 'data/frames');
 const WEB_OUT = path.join(REPO, 'data/out/web');
+// committed demo scene (also what the Pages site ships): the built-in default
+const DEMO_DIR = path.join(REPO, 'docs/demo');
 
 function listSequences() {
   try {
@@ -176,6 +178,17 @@ function splat4dDevApi(): Plugin {
           }
           serveFile(req, res, path.join(dir, name));
           return;
+        }
+
+        // built-in default scene: demo.json + its .splat4d come straight from
+        // docs/demo unless viewer/public overrides them
+        const demo = /^\/(demo\.json|[\w-]+\.splat4d)$/.exec(url.pathname);
+        if (demo && !fs.existsSync(path.join(__dirname, 'public', demo[1]))) {
+          const file = path.join(DEMO_DIR, demo[1]);
+          if (fs.existsSync(file)) {
+            serveFile(req, res, file);
+            return;
+          }
         }
 
         next();
